@@ -8,21 +8,46 @@ const { badRequest } = require('../errors');
  * Usage: router.post('/', validate({ body: vehicleCreate }), handler)
  */
 function validate(schemas) {
-  return (req, res, next) => {
+  // Express calls this function for every request on the route
+  return function checkRequest(req, res, next) {
     req.valid = {};
+
     for (const part of ['params', 'query', 'body']) {
-      if (!schemas[part]) continue;
-      const result = schemas[part].safeParse(req[part] ?? {});
+      const schema = schemas[part];
+      if (!schema) {
+        continue; // this route does not check this part
+      }
+
+      // A missing part (e.g. no body) is checked as an empty object
+      let input = req[part];
+      if (input === undefined || input === null) {
+        input = {};
+      }
+
+      // safeParse never throws: it returns { success, data } or { success, error }
+      const result = schema.safeParse(input);
       if (!result.success) {
-        const message = result.error.issues
-          .map(issue => `${issue.path.join('.') || part}: ${issue.message}`)
-          .join('; ');
-        throw badRequest(message);
+        throw badRequest(describeProblems(result.error.issues, part));
       }
       req.valid[part] = result.data;
     }
-    next();
+
+    next(); // everything is valid: go on to the route handler
   };
+}
+
+/** Turns zod's list of problems into one message, e.g. "latitude: Too big; type: Invalid option". */
+function describeProblems(issues, part) {
+  const messages = [];
+  for (const issue of issues) {
+    // issue.path is the field name, e.g. ['pickupLatitude']; empty means the whole object
+    let field = issue.path.join('.');
+    if (field === '') {
+      field = part;
+    }
+    messages.push(field + ': ' + issue.message);
+  }
+  return messages.join('; ');
 }
 
 module.exports = { validate };

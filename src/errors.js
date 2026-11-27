@@ -7,10 +7,26 @@ class HttpError extends Error {
   }
 }
 
-const badRequest = message => new HttpError(400, message);
-const unauthorized = message => new HttpError(401, message);
-const forbidden = message => new HttpError(403, message);
-const notFound = message => new HttpError(404, message);
-const conflict = message => new HttpError(409, message);
+// Small helpers so services can write: throw notFound('Vehicle not found')
+
+function badRequest(message) {
+  return new HttpError(400, message);
+}
+
+function unauthorized(message) {
+  return new HttpError(401, message);
+}
+
+function forbidden(message) {
+  return new HttpError(403, message);
+}
+
+function notFound(message) {
+  return new HttpError(404, message);
+}
+
+function conflict(message) {
+  return new HttpError(409, message);
+}
 
 module.exports = { HttpError, badRequest, unauthorized, forbidden, notFound, conflict };

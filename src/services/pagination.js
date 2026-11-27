@@ -3,17 +3,34 @@
 
 /** "id" | "id,asc" | "id,desc" -> SQL. Only whitelisted values reach this function (see schemas.js). */
 function orderBy(sort) {
-  return sort === 'id,desc' ? 'ORDER BY id DESC' : 'ORDER BY id ASC';
+  if (sort === 'id,desc') {
+    return 'ORDER BY id DESC';
+  }
+  return 'ORDER BY id ASC';
 }
 
-function toPage(rows, total, { page, size }, mapRow) {
+/** Rounds a distance to 2 decimals, e.g. 3.14159 -> 3.14. */
+function roundTo2(value) {
+  return Math.round(value * 100) / 100;
+}
+
+/**
+ * Builds one page of results.
+ * rows   = database rows for this page, total = number of rows in the whole table,
+ * mapRow = function that turns one database row into the JSON object the API returns.
+ */
+function toPage(rows, total, paging, mapRow) {
+  const content = [];
+  for (const row of rows) {
+    content.push(mapRow(row));
+  }
   return {
-    content: rows.map(mapRow),
-    page,
-    size,
+    content: content,
+    page: paging.page,
+    size: paging.size,
     totalElements: total,
-    totalPages: Math.ceil(total / size),
+    totalPages: Math.ceil(total / paging.size), // e.g. 45 rows, 20 per page -> 3 pages
   };
 }
 
-module.exports = { orderBy, toPage };
+module.exports = { orderBy, toPage, roundTo2 };

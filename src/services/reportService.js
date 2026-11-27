@@ -28,7 +28,13 @@ async function deliveriesPerDriver(days) {
       ORDER BY completed DESC, d.name`,
     [days],
   );
-  return rows.map(r => ({ driverId: r.driver_id, driverName: r.driver_name, completed: r.completed }));
+
+  // snake_case rows -> camelCase JSON
+  const result = [];
+  for (const row of rows) {
+    result.push({ driverId: row.driver_id, driverName: row.driver_name, completed: row.completed });
+  }
+  return result;
 }
 
 /**
@@ -46,30 +52,49 @@ async function vehiclesByStatus() {
       GROUP BY v.status
       ORDER BY v.status`,
   );
-  return rows.map(r => ({ status: r.status, vehicles: r.vehicles, withActiveDriver: r.with_active_driver }));
+
+  const result = [];
+  for (const row of rows) {
+    result.push({ status: row.status, vehicles: row.vehicles, withActiveDriver: row.with_active_driver });
+  }
+  return result;
 }
 
 /** Dashboard counters (same JSON as the Java backend's /api/dashboard/summary). */
 async function dashboardSummary() {
+  // Promise.all runs the three queries at the same time and waits for all of them
   const [vehicles, deliveries, drivers] = await Promise.all([
     db.query('SELECT status, COUNT(*) AS count FROM vehicles GROUP BY status'),
     db.query('SELECT status, COUNT(*) AS count FROM deliveries GROUP BY status'),
     db.query("SELECT COUNT(*) AS count FROM drivers WHERE status = 'ACTIVE'"),
   ]);
+
   const vehiclesByStatus = zeroFilled(VEHICLE_STATUSES, vehicles.rows);
   const deliveriesByStatus = zeroFilled(DELIVERY_STATUSES, deliveries.rows);
+
+  // Active = on the road right now
+  const activeDeliveries = deliveriesByStatus.ASSIGNED + deliveriesByStatus.PICKED_UP + deliveriesByStatus.IN_TRANSIT;
+
   return {
-    vehiclesByStatus,
-    deliveriesByStatus,
-    activeDeliveries: deliveriesByStatus.ASSIGNED + deliveriesByStatus.PICKED_UP + deliveriesByStatus.IN_TRANSIT,
+    vehiclesByStatus: vehiclesByStatus,
+    deliveriesByStatus: deliveriesByStatus,
+    activeDeliveries: activeDeliveries,
     activeDrivers: drivers.rows[0].count,
   };
 }
 
-// Every status appears, with 0 when GROUP BY returned no row for it
+/**
+ * Builds { STATUS: count } with every status present. GROUP BY only returns statuses that
+ * have rows, so we start every status at 0 and then fill in the real counts.
+ */
 function zeroFilled(statuses, rows) {
-  const result = Object.fromEntries(statuses.map(s => [s, 0]));
-  for (const row of rows) result[row.status] = row.count;
+  const result = {};
+  for (const status of statuses) {
+    result[status] = 0;
+  }
+  for (const row of rows) {
+    result[row.status] = row.count;
+  }
   return result;
 }
 

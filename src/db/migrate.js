@@ -16,13 +16,26 @@ async function migrate(databaseUrl, { log = console.log } = {}) {
         version    VARCHAR(255) PRIMARY KEY,
         applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )`);
+    // Which migration files have already run?
     const { rows } = await client.query('SELECT version FROM schema_migrations');
-    const applied = new Set(rows.map(r => r.version));
+    const applied = [];
+    for (const row of rows) {
+      applied.push(row.version);
+    }
 
-    // Zero-padded names (001_, 002_) sort correctly as plain strings
-    const files = fs.readdirSync(MIGRATIONS_DIR).filter(f => f.endsWith('.sql')).sort();
+    // All .sql files in the folder. Zero-padded names (001_, 002_) sort correctly as plain strings.
+    const files = [];
+    for (const name of fs.readdirSync(MIGRATIONS_DIR)) {
+      if (name.endsWith('.sql')) {
+        files.push(name);
+      }
+    }
+    files.sort();
+
     for (const file of files) {
-      if (applied.has(file)) continue;
+      if (applied.includes(file)) {
+        continue; // already applied earlier
+      }
       const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
       // Each file runs in its own transaction: Postgres supports transactional DDL, so a
       // failing migration leaves no half-created tables behind.

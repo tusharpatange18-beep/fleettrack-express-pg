@@ -1,9 +1,17 @@
 const { HttpError } = require('../errors');
 
-const REASONS = { 400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found', 409: 'Conflict', 500: 'Internal Server Error' };
+const REASONS = {
+  400: 'Bad Request',
+  401: 'Unauthorized',
+  403: 'Forbidden',
+  404: 'Not Found',
+  409: 'Conflict',
+  500: 'Internal Server Error',
+};
 
 // Postgres error codes (SQLSTATE) we translate into client errors. These fire when a database
 // constraint catches something the code did not, e.g. two requests racing on the same unique value.
+// Each entry is [HTTP status, message].
 const PG_ERRORS = {
   23505: [409, 'The request conflicts with existing data (duplicate value)'],  // unique_violation
   23503: [409, 'The request refers to a record that does not exist'],          // foreign_key_violation
@@ -23,9 +31,14 @@ const UNIQUE_MESSAGES = {
   uq_deliveries_one_active_per_vehicle: 'Vehicle is already assigned to another active delivery',
 };
 
+/** The URL path without the "?query" part. */
+function pathOf(req) {
+  return req.originalUrl.split('?')[0];
+}
+
 /** 404 for any route that did not match. */
 function notFoundHandler(req, res) {
-  send(res, req, 404, `No endpoint ${req.method} ${req.originalUrl.split('?')[0]}`);
+  send(res, req, 404, `No endpoint ${req.method} ${pathOf(req)}`);
 }
 
 /**
@@ -34,27 +47,43 @@ function notFoundHandler(req, res) {
  */
 // eslint-disable-next-line no-unused-vars
 function errorHandler(err, req, res, next) {
-  if (err instanceof HttpError) return send(res, req, err.status, err.message);
-
-  // Malformed JSON body (thrown by express.json())
-  if (err.type === 'entity.parse.failed') return send(res, req, 400, 'Malformed JSON body');
-
-  if (err.code && PG_ERRORS[err.code]) {
-    const [status, fallback] = PG_ERRORS[err.code];
-    return send(res, req, status, UNIQUE_MESSAGES[err.constraint] || fallback);
+  // Our own errors (notFound, conflict, ...) already carry the right status
+  if (err instanceof HttpError) {
+    return send(res, req, err.status, err.message);
   }
 
+  // Malformed JSON body (thrown by express.json())
+  if (err.type === 'entity.parse.failed') {
+    return send(res, req, 400, 'Malformed JSON body');
+  }
+
+  // A database constraint fired: turn the Postgres code into a 4xx
+  if (err.code && PG_ERRORS[err.code]) {
+    const status = PG_ERRORS[err.code][0];
+    let message = PG_ERRORS[err.code][1];
+    if (UNIQUE_MESSAGES[err.constraint]) {
+      message = UNIQUE_MESSAGES[err.constraint]; // a more specific message for this constraint
+    }
+    return send(res, req, status, message);
+  }
+
+  // Anything else is a bug: log the details, but never leak internals to the client
   console.error(`Unexpected error at ${req.method} ${req.originalUrl}:`, err);
-  send(res, req, 500, 'An unexpected error occurred'); // never leak internals to the client
+  send(res, req, 500, 'An unexpected error occurred');
 }
 
+/** Writes the standard JSON error body (same shape as the Java version). */
 function send(res, req, status, message) {
+  let error = REASONS[status];
+  if (!error) {
+    error = 'Error';
+  }
   res.status(status).json({
     timestamp: new Date().toISOString(),
-    status,
-    error: REASONS[status] || 'Error',
-    message,
-    path: req.originalUrl.split('?')[0],
+    status: status,
+    error: error,
+    message: message,
+    path: pathOf(req),
   });
 }
 
