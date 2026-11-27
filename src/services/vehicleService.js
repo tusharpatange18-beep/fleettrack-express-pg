@@ -1,7 +1,8 @@
 const db = require('../db/pool');
 const { notFound, conflict, badRequest } = require('../errors');
-const { orderBy, toPage } = require('./pagination');
+const { orderBy, toPage, roundTo2 } = require('./pagination');
 
+// The delivery statuses in which a vehicle is "on a job", as an SQL list
 const ACTIVE_DELIVERY = "('ASSIGNED', 'PICKED_UP', 'IN_TRANSIT')";
 
 // snake_case row from Postgres -> camelCase JSON for the API
@@ -18,7 +19,34 @@ function mapVehicle(r) {
   };
 }
 
+/** One location_history row -> API JSON. */
+function mapLocation(r) {
+  return { id: r.id, latitude: r.latitude, longitude: r.longitude, recordedAt: r.recorded_at };
+}
+
+/** One "nearby" result row -> API JSON. */
+function mapNearby(r) {
+  return {
+    vehicleId: r.id,
+    registrationNumber: r.registration_number,
+    type: r.type,
+    distanceKm: roundTo2(r.distance_km),
+    driverId: r.driver_id,
+    locationUpdatedAt: r.location_updated_at,
+  };
+}
+
+/** A value that was not sent (undefined) becomes NULL for SQL. */
+function orNull(value) {
+  if (value === undefined) {
+    return null;
+  }
+  return value;
+}
+
+/** One page of vehicles. */
 async function list(paging) {
+  // $1 = how many rows, $2 = how many rows to skip
   const { rows } = await db.query(
     `SELECT * FROM vehicles ${orderBy(paging.sort)} LIMIT $1 OFFSET $2`,
     [paging.size, paging.page * paging.size],
@@ -29,15 +57,22 @@ async function list(paging) {
 
 async function get(id) {
   const { rows } = await db.query('SELECT * FROM vehicles WHERE id = $1', [id]);
-  if (rows.length === 0) throw notFound(`Vehicle not found with id: ${id}`);
+  if (rows.length === 0) {
+    throw notFound(`Vehicle not found with id: ${id}`);
+  }
   return mapVehicle(rows[0]);
 }
 
-async function create({ registrationNumber, type, status = 'AVAILABLE' }) {
+async function create(request) {
+  // No status sent: a new vehicle starts AVAILABLE
+  let status = 'AVAILABLE';
+  if (request.status) {
+    status = request.status;
+  }
   // A duplicate registration number hits the UNIQUE constraint -> 23505 -> 409 in the error handler
   const { rows } = await db.query(
     'INSERT INTO vehicles (registration_number, type, status) VALUES ($1, $2, $3) RETURNING *',
-    [registrationNumber, type, status],
+    [request.registrationNumber, request.type, status],
   );
   return mapVehicle(rows[0]);
 }
@@ -48,7 +83,9 @@ async function create({ registrationNumber, type, status = 'AVAILABLE' }) {
  */
 async function lockVehicle(client, id) {
   const { rows } = await client.query('SELECT * FROM vehicles WHERE id = $1 FOR UPDATE', [id]);
-  if (rows.length === 0) throw notFound(`Vehicle not found with id: ${id}`);
+  if (rows.length === 0) {
+    throw notFound(`Vehicle not found with id: ${id}`);
+  }
   return rows[0];
 }
 
@@ -63,11 +100,18 @@ async function hasActiveDelivery(client, vehicleId) {
 
 /** Partial update: only fields present in `changes` are written. */
 async function update(id, changes) {
-  return db.withTransaction(async client => {
+  return db.withTransaction(async function (client) {
     const vehicle = await lockVehicle(client, id);
-    if (changes.status && changes.status !== vehicle.status && (await hasActiveDelivery(client, id))) {
-      throw conflict('Vehicle is on an active delivery; finish or cancel it first');
+
+    // Changing the status is refused while the vehicle is on a job
+    const statusChanging = changes.status && changes.status !== vehicle.status;
+    if (statusChanging) {
+      const onJob = await hasActiveDelivery(client, id);
+      if (onJob) {
+        throw conflict('Vehicle is on an active delivery; finish or cancel it first');
+      }
     }
+
     // COALESCE($n, column) keeps the old value when the parameter is NULL (field not sent)
     const { rows } = await client.query(
       `UPDATE vehicles
@@ -77,7 +121,7 @@ async function update(id, changes) {
               updated_at          = now()
         WHERE id = $1
         RETURNING *`,
-      [id, changes.registrationNumber ?? null, changes.type ?? null, changes.status ?? null],
+      [id, orNull(changes.registrationNumber), orNull(changes.type), orNull(changes.status)],
     );
     return mapVehicle(rows[0]);
   });
@@ -85,7 +129,7 @@ async function update(id, changes) {
 
 /** Soft delete: INACTIVE and driver released; history and past deliveries stay intact. */
 async function remove(id) {
-  await db.withTransaction(async client => {
+  await db.withTransaction(async function (client) {
     await lockVehicle(client, id);
     if (await hasActiveDelivery(client, id)) {
       throw conflict('Vehicle is on an active delivery; finish or cancel it first');
@@ -102,45 +146,55 @@ async function remove(id) {
  * The UPDATE writes only the three location columns, so it cannot overwrite a status change made
  * by a concurrent assignment (the "lost update" problem an ORM that rewrites whole rows can have).
  */
-async function updateLocation(id, { latitude, longitude }) {
-  return db.withTransaction(async client => {
+async function updateLocation(id, point) {
+  return db.withTransaction(async function (client) {
     const { rows } = await client.query(
       `UPDATE vehicles
           SET current_latitude = $2, current_longitude = $3, location_updated_at = now()
         WHERE id = $1 AND status <> 'INACTIVE'
         RETURNING *`,
-      [id, latitude, longitude],
+      [id, point.latitude, point.longitude],
     );
+    // Nothing updated: either the vehicle doesn't exist (404) or it is deactivated (409)
     if (rows.length === 0) {
       await get(id); // throws 404 if the vehicle does not exist at all
       throw conflict('Vehicle is deactivated');
     }
+
+    // Same timestamp as the vehicle row, so the trail and the current position match
     await client.query(
       'INSERT INTO location_history (vehicle_id, latitude, longitude, recorded_at) VALUES ($1, $2, $3, $4)',
-      [id, latitude, longitude, rows[0].location_updated_at],
+      [id, point.latitude, point.longitude, rows[0].location_updated_at],
     );
     return mapVehicle(rows[0]);
   });
 }
 
 /** A vehicle's trail, newest first. Served by the index (vehicle_id, recorded_at DESC). */
-async function locationHistory(id, { from, to, page, size }) {
+async function locationHistory(id, query) {
   await get(id); // 404 for unknown vehicles instead of an empty list
-  if (from && to && new Date(from) > new Date(to)) throw badRequest("'from' must not be after 'to'");
-  // NULL parameters disable the corresponding bound
+
+  if (query.from && query.to && new Date(query.from) > new Date(query.to)) {
+    throw badRequest("'from' must not be after 'to'");
+  }
+
+  // NULL parameters disable the corresponding bound ("no from" = from the beginning)
   const where = `vehicle_id = $1
                  AND ($2::timestamptz IS NULL OR recorded_at >= $2)
                  AND ($3::timestamptz IS NULL OR recorded_at <= $3)`;
-  const params = [id, from ?? null, to ?? null];
+  const from = orNull(query.from);
+  const to = orNull(query.to);
+
   const { rows } = await db.query(
     `SELECT id, latitude, longitude, recorded_at FROM location_history
       WHERE ${where} ORDER BY recorded_at DESC, id DESC LIMIT $4 OFFSET $5`,
-    [...params, size, page * size],
+    [id, from, to, query.size, query.page * query.size],
   );
-  const count = await db.query(`SELECT COUNT(*) AS total FROM location_history WHERE ${where}`, params);
-  return toPage(rows, count.rows[0].total, { page, size }, r => ({
-    id: r.id, latitude: r.latitude, longitude: r.longitude, recordedAt: r.recorded_at,
-  }));
+  const count = await db.query(
+    `SELECT COUNT(*) AS total FROM location_history WHERE ${where}`,
+    [id, from, to],
+  );
+  return toPage(rows, count.rows[0].total, query, mapLocation);
 }
 
 /**
@@ -153,7 +207,7 @@ async function locationHistory(id, { from, to, page, size }) {
  *  - location_updated_at >= now() - N minutes : skip vehicles whose position is out of date.
  *  - haversine_km(...) <= radius : the exact great-circle distance (migration 003).
  */
-async function nearby({ latitude, longitude, radiusKm }, { locationMaxAgeMinutes }) {
+async function nearby(search, config) {
   const { rows } = await db.query(
     `SELECT v.id, v.registration_number, v.type, v.driver_id, v.location_updated_at,
             haversine_km($1::float8, $2::float8, v.current_latitude, v.current_longitude) AS distance_km
@@ -164,16 +218,14 @@ async function nearby({ latitude, longitude, radiusKm }, { locationMaxAgeMinutes
         AND v.location_updated_at >= now() - make_interval(mins => $4::int)
         AND haversine_km($1::float8, $2::float8, v.current_latitude, v.current_longitude) <= $3::float8
       ORDER BY distance_km, v.id`,
-    [latitude, longitude, radiusKm, locationMaxAgeMinutes],
+    [search.latitude, search.longitude, search.radiusKm, config.locationMaxAgeMinutes],
   );
-  return rows.map(r => ({
-    vehicleId: r.id,
-    registrationNumber: r.registration_number,
-    type: r.type,
-    distanceKm: Math.round(r.distance_km * 100) / 100,
-    driverId: r.driver_id,
-    locationUpdatedAt: r.location_updated_at,
-  }));
+
+  const result = [];
+  for (const row of rows) {
+    result.push(mapNearby(row));
+  }
+  return result;
 }
 
 module.exports = {

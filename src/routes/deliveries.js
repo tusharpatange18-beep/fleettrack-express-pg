@@ -24,7 +24,11 @@ module.exports = function deliveryRoutes(config) {
 
   router.post('/:id/auto-assign', validate({ params: schemas.idParam, query: schemas.autoAssignQuery }),
     async (req, res) => {
-      const radiusKm = req.valid.query.radiusKm ?? config.autoAssignRadiusKm;
+      // Use the radius from the URL, or the default from the config
+      let radiusKm = config.autoAssignRadiusKm;
+      if (req.valid.query.radiusKm !== undefined) {
+        radiusKm = req.valid.query.radiusKm;
+      }
       res.json(await deliveries.autoAssign(req.valid.params.id, radiusKm, config));
     });
 

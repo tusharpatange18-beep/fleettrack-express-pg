@@ -3,7 +3,9 @@ const { Pool, types } = require('pg');
 // Postgres BIGINT (type id 20) can exceed JavaScript's safe integer range, so `pg` returns it
 // as a string by default. Our ids and COUNT(*) results stay far below 2^53, so parse them to
 // numbers to get clean JSON ({"id": 1} instead of {"id": "1"}).
-types.setTypeParser(20, value => Number.parseInt(value, 10));
+types.setTypeParser(20, function (value) {
+  return Number.parseInt(value, 10); // "42" -> 42 (base 10)
+});
 
 let pool = null;
 
@@ -14,12 +16,16 @@ let pool = null;
 function initPool(databaseUrl) {
   pool = new Pool({ connectionString: databaseUrl, max: 10 });
   // An idle connection can fail (e.g. the database restarted); log instead of crashing
-  pool.on('error', err => console.error('Idle Postgres client error:', err.message));
+  pool.on('error', function (err) {
+    console.error('Idle Postgres client error:', err.message);
+  });
   return pool;
 }
 
 function getPool() {
-  if (!pool) throw new Error('Database pool not initialised; call initPool() first');
+  if (!pool) {
+    throw new Error('Database pool not initialised; call initPool() first');
+  }
   return pool;
 }
 

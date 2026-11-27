@@ -2,6 +2,7 @@ const db = require('../db/pool');
 const { notFound } = require('../errors');
 const { orderBy, toPage } = require('./pagination');
 
+/** Database row (snake_case) -> API JSON (camelCase). */
 function mapCustomer(r) {
   return {
     id: r.id,
@@ -14,6 +15,7 @@ function mapCustomer(r) {
   };
 }
 
+/** One page of customers. */
 async function list(paging) {
   const { rows } = await db.query(
     `SELECT * FROM customers ${orderBy(paging.sort)} LIMIT $1 OFFSET $2`,
@@ -25,10 +27,13 @@ async function list(paging) {
 
 async function get(id) {
   const { rows } = await db.query('SELECT * FROM customers WHERE id = $1', [id]);
-  if (rows.length === 0) throw notFound(`Customer not found with id: ${id}`);
+  if (rows.length === 0) {
+    throw notFound(`Customer not found with id: ${id}`);
+  }
   return mapCustomer(rows[0]);
 }
 
+/** Saves a customer with their usual pickup and drop addresses. */
 async function create(c) {
   const { rows } = await db.query(
     `INSERT INTO customers (name, phone, pickup_latitude, pickup_longitude, drop_latitude, drop_longitude)

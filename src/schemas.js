@@ -8,8 +8,22 @@ const id = z.coerce.number().int().positive();
 
 const VEHICLE_TYPES = ['BIKE', 'VAN', 'TRUCK'];
 const DELIVERY_STATUSES = ['CREATED', 'ASSIGNED', 'PICKED_UP', 'IN_TRANSIT', 'DELIVERED', 'CANCELLED'];
-// Accept "van" as well as "VAN", like the Java version
-const upperEnum = values => z.string().transform(s => s.toUpperCase()).pipe(z.enum(values));
+/**
+ * A text field that must be one of `values`. "van" is accepted as well as "VAN", like the Java
+ * version: the text is first turned into capitals, then checked against the list.
+ */
+function upperEnum(values) {
+  return z.string()
+    .transform(function (text) { return text.toUpperCase(); })
+    .pipe(z.enum(values));
+}
+
+/** True when both values were sent, or both were left out. Only one of them is an error. */
+function bothOrNeither(a, b) {
+  const aSent = a !== undefined;
+  const bSent = b !== undefined;
+  return aSent === bSent;
+}
 
 const idParam = z.object({ id });
 
@@ -77,9 +91,10 @@ const deliveryCreate = z.object({
   dropLatitude: latitude.optional(),
   dropLongitude: longitude.optional(),
 })
-  .refine(d => (d.pickupLatitude === undefined) === (d.pickupLongitude === undefined),
+  // .refine adds our own rule on top of zod's checks: a lat/lng pair must be complete
+  .refine(function (d) { return bothOrNeither(d.pickupLatitude, d.pickupLongitude); },
     { message: 'pickupLatitude and pickupLongitude must be sent together', path: ['pickupLatitude'] })
-  .refine(d => (d.dropLatitude === undefined) === (d.dropLongitude === undefined),
+  .refine(function (d) { return bothOrNeither(d.dropLatitude, d.dropLongitude); },
     { message: 'dropLatitude and dropLongitude must be sent together', path: ['dropLatitude'] });
 const assignQuery = z.object({ vehicleId: id });
 const autoAssignQuery = z.object({ radiusKm: z.coerce.number().positive().max(500).optional() });
